@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 
 require_relative "../json_rpc_handler"
+require_relative "cancellation"
+require_relative "cancelled_error"
 require_relative "instrumentation"
 require_relative "methods"
 require_relative "logging_message_notification"
@@ -384,6 +386,13 @@ module MCP
     end
 
     def handle_request(request, method, session: nil, related_request_id: nil)
+      # `notifications/cancelled` is dispatched directly: it is a notification (no JSON-RPC id)
+      # and intentionally bypasses the `@handlers` lookup, capability check, in-flight registry,
+      # and rescue blocks below.
+      if method == Methods::NOTIFICATIONS_CANCELLED
+        return ->(params) { handle_cancelled_notification(params, session: session) }
+      end
+
       handler = @handlers[method]
       unless handler
         instrument_call("unsupported_method", server_context: { request: request }) do
@@ -394,6 +403,12 @@ module MCP
       end
 
       Methods.ensure_capability!(method, capabilities)
+
+      # `initialize` MUST NOT be cancelled (MCP spec 2025-11-25, cancellation item 2),
+      # so do not track it in the in-flight registry.
+      cancellation = if related_request_id && method != Methods::INITIALIZE
+        session&.register_in_flight(related_request_id)
+      end
 
       ->(params) {
         reported_exception = nil
@@ -406,23 +421,33 @@ module MCP
           when Methods::INITIALIZE
             init(params, session: session)
           when Methods::RESOURCES_READ
-            { contents: @handlers[Methods::RESOURCES_READ].call(params) }
+            { contents: read_resource_contents(params, session: session, related_request_id: related_request_id, cancellation: cancellation) }
           when Methods::RESOURCES_SUBSCRIBE, Methods::RESOURCES_UNSUBSCRIBE
-            @handlers[method].call(params)
+            dispatch_optional_context_handler(@handlers[method], params, session: session, related_request_id: related_request_id, cancellation: cancellation)
             {}
           when Methods::TOOLS_CALL
-            call_tool(params, session: session, related_request_id: related_request_id)
+            call_tool(params, session: session, related_request_id: related_request_id, cancellation: cancellation)
+          when Methods::PROMPTS_GET
+            get_prompt(params, session: session, related_request_id: related_request_id, cancellation: cancellation)
           when Methods::COMPLETION_COMPLETE
-            complete(params)
+            complete(params, session: session, related_request_id: related_request_id, cancellation: cancellation)
           when Methods::LOGGING_SET_LEVEL
             configure_logging_level(params, session: session)
           else
-            @handlers[method].call(params)
+            dispatch_optional_context_handler(@handlers[method], params, session: session, related_request_id: related_request_id, cancellation: cancellation)
           end
           client = session&.client || @client
           add_instrumentation_data(client: client) if client
 
+          if cancellation&.cancelled?
+            add_instrumentation_data(cancelled: true, cancellation_reason: cancellation.reason)
+            next JsonRpcHandler::NO_RESPONSE
+          end
+
           result
+        rescue CancelledError => e
+          add_instrumentation_data(cancelled: true, cancellation_reason: e.reason)
+          next JsonRpcHandler::NO_RESPONSE
         rescue RequestHandlerError => e
           report_exception(e.original_error || e, { request: request })
           add_instrumentation_data(error: e.error_type)
@@ -434,8 +459,21 @@ module MCP
           wrapped = RequestHandlerError.new("Internal error handling #{method} request", request, original_error: e)
           reported_exception = wrapped
           raise wrapped
+        ensure
+          session&.unregister_in_flight(related_request_id) if related_request_id
         end
       }
+    end
+
+    def handle_cancelled_notification(params, session: nil)
+      return unless session
+      return unless params.is_a?(Hash)
+
+      request_id = params[:requestId] || params["requestId"]
+      return if request_id.nil?
+
+      reason = params[:reason] || params["reason"]
+      session.cancel_incoming(request_id: request_id, reason: reason)
     end
 
     def default_capabilities
@@ -516,7 +554,7 @@ module MCP
       { tools: page[:items], nextCursor: page[:next_cursor] }.compact
     end
 
-    def call_tool(request, session: nil, related_request_id: nil)
+    def call_tool(request, session: nil, related_request_id: nil, cancellation: nil)
       tool_name = request[:name]
 
       tool = tools[tool_name]
@@ -548,8 +586,12 @@ module MCP
 
       progress_token = request.dig(:_meta, :progressToken)
 
-      call_tool_with_args(tool, arguments, server_context_with_meta(request), progress_token: progress_token, session: session, related_request_id: related_request_id)
-    rescue RequestHandlerError
+      call_tool_with_args(
+        tool, arguments, server_context_with_meta(request), progress_token: progress_token, session: session, related_request_id: related_request_id, cancellation: cancellation
+      )
+    rescue RequestHandlerError, CancelledError
+      # CancelledError is intentionally not wrapped so `handle_request` can turn it into
+      # `JsonRpcHandler::NO_RESPONSE` per the MCP cancellation spec.
       raise
     rescue => e
       raise RequestHandlerError.new(
@@ -566,7 +608,7 @@ module MCP
       { prompts: page[:items], nextCursor: page[:next_cursor] }.compact
     end
 
-    def get_prompt(request)
+    def get_prompt(request, session: nil, related_request_id: nil, cancellation: nil)
       prompt_name = request[:name]
       prompt = @prompts[prompt_name]
       unless prompt
@@ -579,7 +621,14 @@ module MCP
       prompt_args = request[:arguments]
       prompt.validate_arguments!(prompt_args)
 
-      call_prompt_template_with_args(prompt, prompt_args, server_context_with_meta(request))
+      server_context = build_server_context(
+        request: request,
+        session: session,
+        related_request_id: related_request_id,
+        cancellation: cancellation,
+      )
+
+      call_prompt_template_with_args(prompt, prompt_args, server_context)
     end
 
     def list_resources(request)
@@ -600,12 +649,80 @@ module MCP
       { resourceTemplates: page[:items], nextCursor: page[:next_cursor] }.compact
     end
 
-    def complete(params)
+    def complete(params, session: nil, related_request_id: nil, cancellation: nil)
       validate_completion_params!(params)
 
-      result = @handlers[Methods::COMPLETION_COMPLETE].call(params)
+      result = dispatch_optional_context_handler(
+        @handlers[Methods::COMPLETION_COMPLETE],
+        params,
+        session: session,
+        related_request_id: related_request_id,
+        cancellation: cancellation,
+      )
 
       normalize_completion_result(result)
+    end
+
+    # Invokes `resources/read` via the registered handler. If the handler block opts in to `server_context:`,
+    # pass an `MCP::ServerContext` so the handler can observe cancellation via `server_context.cancelled?` or
+    # `server_context.raise_if_cancelled!`.
+    def read_resource_contents(request, session: nil, related_request_id: nil, cancellation: nil)
+      dispatch_optional_context_handler(
+        @handlers[Methods::RESOURCES_READ],
+        request,
+        session: session,
+        related_request_id: related_request_id,
+        cancellation: cancellation,
+      )
+    end
+
+    # Opt-in `server_context:` dispatch for block-based handlers registered via `resources_read_handler`,
+    # `completion_handler`, `resources_subscribe_handler`, `resources_unsubscribe_handler`, or `define_custom_method`.
+    # Existing handlers that only accept `params` are called unchanged; handlers that declare a `server_context:`
+    # keyword receive an `MCP::ServerContext` wrapping the raw server context with cancellation plumbing.
+    def dispatch_optional_context_handler(handler, params, session: nil, related_request_id: nil, cancellation: nil)
+      return handler.call(params) unless handler_declares_server_context?(handler)
+
+      server_context = build_server_context(
+        request: params,
+        session: session,
+        related_request_id: related_request_id,
+        cancellation: cancellation,
+      )
+      handler.call(params, server_context: server_context)
+    end
+
+    # Stricter than `accepts_server_context?`: requires `server_context` to appear as a named keyword parameter
+    # (`:key` optional, `:keyreq` required). Positional parameters named `server_context` (`:req` / `:opt`) are NOT
+    # treated as opt-in - otherwise `handler.call(params, server_context: ctx)` would pass the `{server_context: ctx}`
+    # Hash as the handler's second positional argument, which is never what the user meant.
+    #
+    # `**kwargs`-only signatures (`:keyrest` without a named `server_context`) are also not opt-in here,
+    # because the dispatch site passes a positional `params`, and a `**kwargs`-only block cannot accept
+    # that positional argument (lambdas/methods raise `ArgumentError`; non-lambda procs silently drop `params`).
+    # Tool handlers intentionally allow `**kwargs` opt-in via `accepts_server_context?` because they are invoked
+    # via `tool.call(**args, server_context: …)` without a positional argument.
+    def handler_declares_server_context?(handler)
+      return false unless handler.respond_to?(:parameters)
+
+      handler.parameters.any? do |type, name|
+        name == :server_context && (type == :key || type == :keyreq)
+      end
+    end
+
+    # Builds an `MCP::ServerContext` used to give a handler access to session-scoped helpers
+    # (progress, cancellation, nested server-to-client requests).
+    def build_server_context(request:, session:, related_request_id:, cancellation:)
+      meta_source = request.is_a?(Hash) ? request : {}
+      progress_token = meta_source.dig(:_meta, :progressToken)
+      progress = Progress.new(notification_target: session, progress_token: progress_token, related_request_id: related_request_id)
+      ServerContext.new(
+        server_context_with_meta(meta_source),
+        progress: progress,
+        notification_target: session,
+        related_request_id: related_request_id,
+        cancellation: cancellation,
+      )
     end
 
     def report_exception(exception, server_context = {})
@@ -628,18 +745,32 @@ module MCP
       ).to_h
     end
 
+    # Whether a tool/prompt handler opts in to receiving an `MCP::ServerContext`.
+    # Recognizes `:keyrest` (`**kwargs`) because tools are invoked without a positional argument
+    # (`tool.call(**args, server_context:)`), soa `**kwargs`-only signature safely captures `server_context:`.
+    # Named keyword `server_context` must be `:key` or `:keyreq` - positional parameters (`:req` / `:opt`) that
+    # happen to be named `server_context` are excluded because the call site passes `server_context:` as a keyword,
+    # and a positional slot would receive the `{server_context: ctx}` Hash instead.
     def accepts_server_context?(method_object)
       parameters = method_object.parameters
 
-      parameters.any? { |type, name| type == :keyrest || name == :server_context }
+      parameters.any? do |type, name|
+        type == :keyrest || (name == :server_context && (type == :key || type == :keyreq))
+      end
     end
 
-    def call_tool_with_args(tool, arguments, context, progress_token: nil, session: nil, related_request_id: nil)
+    def call_tool_with_args(tool, arguments, context, progress_token: nil, session: nil, related_request_id: nil, cancellation: nil)
       args = arguments&.transform_keys(&:to_sym) || {}
 
       if accepts_server_context?(tool.method(:call))
         progress = Progress.new(notification_target: session, progress_token: progress_token, related_request_id: related_request_id)
-        server_context = ServerContext.new(context, progress: progress, notification_target: session, related_request_id: related_request_id)
+        server_context = ServerContext.new(
+          context,
+          progress: progress,
+          notification_target: session,
+          related_request_id: related_request_id,
+          cancellation: cancellation,
+        )
         tool.call(**args, server_context: server_context).to_h
       else
         tool.call(**args).to_h

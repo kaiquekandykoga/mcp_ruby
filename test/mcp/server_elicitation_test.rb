@@ -15,14 +15,14 @@ module MCP
         @notifications = []
       end
 
-      def send_request(method, params = nil)
+      def send_request(method, params = nil, **_kwargs)
         @requests << { method: method, params: params }
         { action: "accept" }
       end
 
       def send_response(response); end
 
-      def send_notification(method, params = nil)
+      def send_notification(method, params = nil, **_kwargs)
         @notifications << { method: method, params: params }
       end
 

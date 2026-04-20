@@ -8,6 +8,8 @@ require_relative "mcp/version"
 
 module MCP
   autoload :Annotations, "mcp/annotations"
+  autoload :Cancellation, "mcp/cancellation"
+  autoload :CancelledError, "mcp/cancelled_error"
   autoload :Client, "mcp/client"
   autoload :Content, "mcp/content"
   autoload :Icon, "mcp/icon"

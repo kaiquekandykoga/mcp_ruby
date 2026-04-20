@@ -18,6 +18,11 @@ module JsonRpcHandler
 
   DEFAULT_ALLOWED_ID_CHARACTERS = /\A[a-zA-Z0-9_-]+\z/
 
+  # Sentinel return value from a handler. When a handler returns this,
+  # `process_request` emits no JSON-RPC response for the request,
+  # matching the notification-style semantics (id is ignored).
+  NO_RESPONSE = Object.new.freeze
+
   extend self
 
   def handle(request, id_validation_pattern: DEFAULT_ALLOWED_ID_CHARACTERS, &method_finder)
@@ -103,6 +108,7 @@ module JsonRpcHandler
       end
 
       result = method.call(params)
+      return if result.equal?(NO_RESPONSE)
 
       success_response(id: id, result: result)
     rescue MCP::Server::RequestHandlerError => e

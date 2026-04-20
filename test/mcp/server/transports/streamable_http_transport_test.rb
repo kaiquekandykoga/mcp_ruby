@@ -2168,6 +2168,239 @@ module MCP
           assert_equal "correct", result[:content][:text]
         end
 
+        test "send_request with parent_cancellation unblocks with MCP::CancelledError when cancelled" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          io = StringIO.new
+          get_request = create_rack_request("GET", "/", { "HTTP_MCP_SESSION_ID" => session_id })
+          response = @transport.handle_request(get_request)
+          response[2].call(io) if response[2].is_a?(Proc)
+
+          sleep(0.1)
+
+          cancellation = MCP::Cancellation.new(request_id: "parent-1")
+          server_session = @transport.instance_variable_get(:@sessions)[session_id][:server_session]
+
+          result_queue = Queue.new
+          Thread.new do
+            @transport.send_request(
+              "sampling/createMessage",
+              { messages: [] },
+              session_id: session_id,
+              parent_cancellation: cancellation,
+              server_session: server_session,
+            )
+          rescue => e
+            result_queue.push(e)
+          end
+
+          sleep(0.1)
+          cancellation.cancel(reason: "parent cancelled")
+
+          error = result_queue.pop
+          assert_kind_of MCP::CancelledError, error
+        end
+
+        test "send_request deregisters on_cancel hook after completion so late parent cancel is a no-op" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          io = StringIO.new
+          get_request = create_rack_request("GET", "/", { "HTTP_MCP_SESSION_ID" => session_id })
+          response = @transport.handle_request(get_request)
+          response[2].call(io) if response[2].is_a?(Proc)
+
+          sleep(0.1)
+
+          cancellation = MCP::Cancellation.new(request_id: "parent-x")
+          server_session = @transport.instance_variable_get(:@sessions)[session_id][:server_session]
+
+          result_queue = Queue.new
+          Thread.new do
+            result = @transport.send_request(
+              "sampling/createMessage",
+              { messages: [] },
+              session_id: session_id,
+              parent_cancellation: cancellation,
+              server_session: server_session,
+            )
+            result_queue.push(result)
+          end
+
+          sleep(0.1)
+
+          io.rewind
+          data_lines = io.read.lines.select { |line| line.start_with?("data: ") }
+          request_data = JSON.parse(data_lines.first.sub("data: ", ""))
+          nested_request_id = request_data["id"]
+
+          # Client responds successfully; send_request completes normally.
+          client_response = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json", "HTTP_MCP_SESSION_ID" => session_id },
+            { jsonrpc: "2.0", id: nested_request_id, result: { role: "assistant", content: { type: "text", text: "ok" } } }.to_json,
+          )
+          @transport.handle_request(client_response)
+
+          result = result_queue.pop
+          assert_equal "ok", result[:content][:text]
+
+          # Snapshot what was written to the SSE stream before late cancel.
+          io.rewind
+          before_cancel = io.read
+
+          # Parent is cancelled after the nested request already completed. The hook must
+          # have been deregistered, so no `notifications/cancelled` should go to the peer
+          # for the already-completed nested request.
+          cancellation.cancel(reason: "late")
+
+          sleep(0.05) # Give any stray callback time to fire (none should).
+
+          io.rewind
+          after_cancel = io.read
+
+          refute_includes after_cancel.sub(before_cancel, ""), "notifications/cancelled"
+        end
+
+        test "cancel_pending_request is no-op when a real response is already queued (race)" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          io = StringIO.new
+          get_request = create_rack_request("GET", "/", { "HTTP_MCP_SESSION_ID" => session_id })
+          response = @transport.handle_request(get_request)
+          response[2].call(io) if response[2].is_a?(Proc)
+
+          sleep(0.1)
+
+          result_queue = Queue.new
+          Thread.new do
+            result = @transport.send_request(
+              "sampling/createMessage",
+              { messages: [] },
+              session_id: session_id,
+            )
+            result_queue.push(result)
+          end
+
+          sleep(0.1)
+
+          io.rewind
+          data_lines = io.read.lines.select { |line| line.start_with?("data: ") }
+          request_data = JSON.parse(data_lines.first.sub("data: ", ""))
+          request_id = request_data["id"]
+
+          # Client responded first.
+          client_response = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json", "HTTP_MCP_SESSION_ID" => session_id },
+            { jsonrpc: "2.0", id: request_id, result: { role: "assistant", content: { type: "text", text: "ok" } } }.to_json,
+          )
+          @transport.handle_request(client_response)
+
+          # Cancel arrives after the response was already enqueued. Must not clobber the result.
+          @transport.cancel_pending_request(request_id, reason: "late cancel")
+
+          result = result_queue.pop
+          assert_equal "ok", result[:content][:text]
+        end
+
+        test "JSON response mode returns accepted when cancellation suppresses response" do
+          server = Server.new(name: "test", tools: [], prompts: [], resources: [])
+          transport = StreamableHTTPTransport.new(server, enable_json_response: true)
+          server.transport = transport
+
+          server.define_tool(name: "slow_tool") do |server_context:|
+            50.times do
+              break if server_context.cancelled?
+
+              sleep(0.01)
+            end
+
+            Tool::Response.new([{ type: "text", text: "done" }])
+          end
+
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            {
+              jsonrpc: "2.0",
+              method: "initialize",
+              id: "init",
+              params: { protocolVersion: "2025-11-25", clientInfo: { name: "test" } },
+            }.to_json,
+          )
+          init_response = transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+          server_session = transport.instance_variable_get(:@sessions)[session_id][:server_session]
+
+          tool_request = create_rack_request(
+            "POST",
+            "/",
+            {
+              "CONTENT_TYPE" => "application/json",
+              "HTTP_MCP_SESSION_ID" => session_id,
+            },
+            {
+              jsonrpc: "2.0",
+              id: "call-1",
+              method: "tools/call",
+              params: { name: "slow_tool", arguments: {} },
+            }.to_json,
+          )
+
+          response_queue = Queue.new
+          request_thread = Thread.new { response_queue.push(transport.handle_request(tool_request)) }
+          sleep(0.01) until server_session.lookup_in_flight("call-1")
+
+          cancel_request = create_rack_request(
+            "POST",
+            "/",
+            {
+              "CONTENT_TYPE" => "application/json",
+              "HTTP_MCP_SESSION_ID" => session_id,
+            },
+            {
+              jsonrpc: "2.0",
+              method: MCP::Methods::NOTIFICATIONS_CANCELLED,
+              params: { requestId: "call-1", reason: "user cancelled" },
+            }.to_json,
+          )
+
+          cancel_response = transport.handle_request(cancel_request)
+          assert_equal(202, cancel_response[0])
+
+          response = response_queue.pop
+          assert_equal(202, response[0])
+          assert_empty(response[1])
+          assert_empty(response[2])
+        ensure
+          request_thread.kill if request_thread.alive?
+          transport.close
+        end
+
         test "send_request raises on error response from client" do
           # Create session.
           init_request = create_rack_request(

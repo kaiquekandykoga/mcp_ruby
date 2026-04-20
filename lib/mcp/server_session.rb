@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require_relative "cancellation"
 require_relative "methods"
 
 module MCP
@@ -15,6 +16,48 @@ module MCP
       @client = nil
       @client_capabilities = nil
       @logging_message_notification = nil
+      @in_flight = {}
+      @in_flight_mutex = Mutex.new
+    end
+
+    # Registers a `Cancellation` token for an in-flight request.
+    def register_in_flight(request_id)
+      return if request_id.nil?
+
+      cancellation = Cancellation.new(request_id: request_id)
+      @in_flight_mutex.synchronize { @in_flight[request_id] = cancellation }
+      cancellation
+    end
+
+    def unregister_in_flight(request_id)
+      return if request_id.nil?
+
+      @in_flight_mutex.synchronize { @in_flight.delete(request_id) }
+    end
+
+    def lookup_in_flight(request_id)
+      @in_flight_mutex.synchronize { @in_flight[request_id] }
+    end
+
+    # Flips the `Cancellation` for a matching in-flight request received from the peer.
+    # Silently ignores unknown IDs per MCP spec (cancellation utilities, item 5).
+    def cancel_incoming(request_id:, reason: nil)
+      cancellation = lookup_in_flight(request_id)
+      cancellation&.cancel(reason: reason)
+    end
+
+    # Sends `notifications/cancelled` to the peer for a previously-issued request.
+    # Also unblocks any transport-level `send_request` waiting on a response for `request_id`.
+    def cancel_request(request_id:, reason: nil)
+      params = { requestId: request_id }
+      params[:reason] = reason if reason
+      send_to_transport(Methods::NOTIFICATIONS_CANCELLED, params)
+
+      if @transport.respond_to?(:cancel_pending_request)
+        @transport.cancel_pending_request(request_id, reason: reason)
+      end
+    rescue => e
+      MCP.configuration.exception_reporter.call(e, { notification: "cancelled", request_id: request_id })
     end
 
     def handle(request)
@@ -78,6 +121,23 @@ module MCP
       send_to_transport_request(Methods::ELICITATION_CREATE, params, related_request_id: related_request_id)
     end
 
+    # Sends `notifications/cancelled` to the peer for a nested server-to-client request
+    # that was started inside a now-cancelled parent request. `related_request_id`
+    # is the parent request id so the notification is routed to the same stream
+    # (e.g. the parent's POST response stream on `StreamableHTTPTransport`) rather than
+    # the GET SSE stream.
+    def send_peer_cancellation(nested_request_id:, related_request_id: nil, reason: nil)
+      params = { requestId: nested_request_id }
+      params[:reason] = reason if reason
+      send_to_transport(Methods::NOTIFICATIONS_CANCELLED, params, related_request_id: related_request_id)
+
+      if @transport.respond_to?(:cancel_pending_request)
+        @transport.cancel_pending_request(nested_request_id, reason: reason)
+      end
+    rescue => e
+      MCP.configuration.exception_reporter.call(e, { notification: "cancelled", request_id: nested_request_id })
+    end
+
     # Sends an elicitation complete notification scoped to this session.
     def notify_elicitation_complete(elicitation_id:)
       send_to_transport(Methods::NOTIFICATIONS_ELICITATION_COMPLETE, { elicitationId: elicitation_id })
@@ -121,32 +181,57 @@ module MCP
 
     private
 
-    # Branches on `@session_id` because `StdioTransport` creates a `ServerSession` without
-    # a `session_id` (`session_id: nil`), while `StreamableHTTPTransport` always provides one.
-    #
-    # TODO: When Ruby 2.7 support is dropped, replace with a direct call:
-    # `@transport.send_notification(method, params, session_id: @session_id)` and
-    # add `**` to `Transport#send_notification` and `StdioTransport#send_notification`.
+    # Forwards `send_notification` to the transport with only the kwargs the transport's method signature
+    # actually accepts. Custom transports that implement the abstract `send_notification(method, params = nil)`
+    # contract continue to work unchanged; bundled transports that declare `session_id:` / `related_request_id:`
+    # receive the session-scoped routing information.
     def send_to_transport(method, params, related_request_id: nil)
-      if @session_id
-        @transport.send_notification(method, params, session_id: @session_id, related_request_id: related_request_id)
-      else
-        @transport.send_notification(method, params)
-      end
+      kwargs = {
+        session_id: @session_id,
+        related_request_id: related_request_id,
+      }.compact
+
+      forward_to_transport(@transport.method(:send_notification), method, params, kwargs)
     end
 
-    # Branches on `@session_id` because `StdioTransport` creates a `ServerSession` without
-    # a `session_id` (`session_id: nil`), while `StreamableHTTPTransport` always provides one.
-    #
-    # TODO: When Ruby 2.7 support is dropped, replace with a direct call:
-    # `@transport.send_request(method, params, session_id: @session_id)` and
-    # add `**` to `Transport#send_request` and `StdioTransport#send_request`.
+    # Forwards `send_request` to the transport with only the kwargs the transport's method signature
+    # actually accepts. Custom transports that implement the abstract `send_request(method, params = nil)`
+    # contract continue to work; bundled transports that declare `session_id:` / `related_request_id:` /
+    # `parent_cancellation:` / `server_session:` receive the nested-cancellation plumbing.
+    # When `related_request_id` names an in-flight request, its `Cancellation` token is looked up
+    # so that cancelling the parent also cancels this nested server-to-client request.
     def send_to_transport_request(method, params, related_request_id: nil)
-      if @session_id
-        @transport.send_request(method, params, session_id: @session_id, related_request_id: related_request_id)
+      parent_cancellation = related_request_id ? lookup_in_flight(related_request_id) : nil
+
+      kwargs = {
+        session_id: @session_id,
+        related_request_id: related_request_id,
+        parent_cancellation: parent_cancellation,
+        server_session: self,
+      }.compact
+
+      forward_to_transport(@transport.method(:send_request), method, params, kwargs)
+    end
+
+    # Calls `transport_method(method, params, **supported)` where `supported` contains only the keys
+    # the transport's method signature accepts. This keeps bundled transports (which declare the new kwargs)
+    # working while preserving compatibility with custom transports that implement only the abstract
+    # `(method, params = nil)` contract.
+    def forward_to_transport(transport_method, method, params, kwargs)
+      parameters = transport_method.parameters
+      accepts_keyrest = parameters.any? { |type, _| type == :keyrest }
+      supported = if accepts_keyrest
+        kwargs
       else
-        @transport.send_request(method, params)
+        allowed = parameters.filter_map { |type, name| name if type == :key || type == :keyreq }
+        kwargs.slice(*allowed)
       end
+
+      # Always splat `**supported` even when empty: on Ruby 2.7 the bare `transport_method.call(method, params)`
+      # form would let the trailing `params` Hash be auto-promoted to keyword arguments when the receiver
+      # accepts `**kwargs`, breaking handlers that rely on `params` arriving as a positional Hash.
+      # The explicit splat suppresses that conversion and is a no-op when `supported` is empty.
+      transport_method.call(method, params, **supported)
     end
   end
 end

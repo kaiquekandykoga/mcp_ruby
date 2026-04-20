@@ -2,11 +2,22 @@
 
 module MCP
   class ServerContext
-    def initialize(context, progress:, notification_target:, related_request_id: nil)
+    attr_reader :cancellation
+
+    def initialize(context, progress:, notification_target:, related_request_id: nil, cancellation: nil)
       @context = context
       @progress = progress
       @notification_target = notification_target
       @related_request_id = related_request_id
+      @cancellation = cancellation
+    end
+
+    def cancelled?
+      !!@cancellation&.cancelled?
+    end
+
+    def raise_if_cancelled!
+      @cancellation&.raise_if_cancelled!
     end
 
     # Reports progress for the current tool operation.

@@ -175,7 +175,7 @@ module MCP
         # sends the request via SSE stream, then blocks on `queue.pop`.
         # When the client POSTs a response, `handle_response` matches it by `request_id`
         # and pushes the result onto the queue, unblocking this thread.
-        def send_request(method, params = nil, session_id: nil, related_request_id: nil)
+        def send_request(method, params = nil, session_id: nil, related_request_id: nil, parent_cancellation: nil, server_session: nil)
           if @stateless
             raise "Stateless mode does not support server-to-client requests."
           end
@@ -190,6 +190,7 @@ module MCP
 
           request_id = generate_request_id
           queue = Queue.new
+          cancel_hook = nil
 
           request = { jsonrpc: "2.0", id: request_id, method: method }
           request[:params] = params if params
@@ -229,6 +230,16 @@ module MCP
             raise "No active stream for #{method} request."
           end
 
+          if parent_cancellation && server_session
+            cancel_hook = parent_cancellation.on_cancel do |reason|
+              server_session.send_peer_cancellation(
+                nested_request_id: request_id,
+                related_request_id: related_request_id,
+                reason: reason,
+              )
+            end
+          end
+
           response = queue.pop
 
           if response.is_a?(Hash) && response.key?(:error)
@@ -239,11 +250,39 @@ module MCP
             raise "SSE session closed while waiting for #{method} response."
           end
 
+          if response == :cancelled
+            reason = @mutex.synchronize { @pending_responses.dig(request_id, :cancel_reason) }
+            raise MCP::CancelledError.new(
+              "#{method} request was cancelled",
+              request_id: request_id,
+              reason: reason,
+            )
+          end
+
           response
         ensure
+          parent_cancellation.off_cancel(cancel_hook) if cancel_hook
           if request_id
             @mutex.synchronize do
               @pending_responses.delete(request_id)
+            end
+          end
+        end
+
+        # Unblocks a `send_request` awaiting a response when the peer is being cancelled.
+        # The waiting thread will see `:cancelled` on its queue and raise `MCP::CancelledError`.
+        #
+        # Race note: this is first-writer-wins on the pending-response queue. If a real response
+        # has already been pushed (client responded before the cancel hook fired), that response
+        # wins and `:cancelled` is enqueued behind it but never read - `send_request` returns
+        # the real response and deletes the pending entry in its `ensure` block. Conversely,
+        # if `:cancelled` arrives first, any later client response is silently dropped in `handle_response`
+        # because the pending entry has been removed.
+        def cancel_pending_request(request_id, reason: nil)
+          @mutex.synchronize do
+            if (pending = @pending_responses[request_id])
+              pending[:cancel_reason] = reason
+              pending[:queue].push(:cancelled)
             end
           end
         end
@@ -309,6 +348,7 @@ module MCP
             return missing_session_id_response if !@stateless && !session_id
 
             if notification?(body)
+              dispatch_notification(body_string, session_id)
               handle_accepted
             elsif response?(body)
               return session_not_found_response if !@stateless && !session_exists?(session_id)
@@ -459,6 +499,22 @@ module MCP
           !body[:id] && !!body[:method]
         end
 
+        # Dispatches a client-originated notification (e.g. `notifications/cancelled`,
+        # `notifications/initialized`) through the server so it can update session state.
+        def dispatch_notification(body_string, session_id)
+          server_session = nil
+          if session_id && !@stateless
+            @mutex.synchronize do
+              session = @sessions[session_id]
+              server_session = session[:server_session] if session
+            end
+          end
+
+          dispatch_handle_json(body_string, server_session)
+        rescue => e
+          MCP.configuration.exception_reporter.call(e, { error: "Failed to dispatch notification" })
+        end
+
         def response?(body)
           !!body[:id] && !body[:method]
         end
@@ -536,6 +592,12 @@ module MCP
             handle_request_with_sse_response(body_string, session_id, server_session, related_request_id: related_request_id)
           else
             response = dispatch_handle_json(body_string, server_session)
+
+            # `Server#handle_json` returns `nil` when cancellation has suppressed the JSON-RPC response per spec.
+            # Mirror the notification path and ack with 202 instead of returning a 200 with a `nil` Rack body,
+            # which would produce an empty body the client cannot parse as JSON.
+            return handle_accepted if response.nil?
+
             [200, { "Content-Type" => "application/json" }, [response]]
           end
         end
