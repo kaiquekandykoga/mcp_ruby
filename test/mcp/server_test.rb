@@ -312,7 +312,7 @@ module MCP
       assert_instrumentation_data({ method: "tools/call", tool_name: tool_name, tool_arguments: tool_args })
     end
 
-    test "#handle tools/call returns protocol error in JSON-RPC format if required tool arguments are missing" do
+    test "#handle tools/call returns tool execution error if required tool arguments are missing" do
       tool_with_required_argument = Tool.define(
         name: "test_tool",
         title: "Test tool",
@@ -336,10 +336,10 @@ module MCP
 
       response = server.handle(request)
 
-      assert_nil response[:result]
-      assert_equal(-32602, response[:error][:code])
-      assert_equal "Invalid params", response[:error][:message]
-      assert_includes response[:error][:data], "Missing required arguments: message"
+      assert_nil response[:error]
+      assert(response[:result][:isError])
+      assert_equal "text", response[:result][:content][0][:type]
+      assert_includes response[:result][:content][0][:text], "Missing required arguments: message"
     end
 
     test "#handle_json tools/call executes tool and returns result" do
@@ -1562,11 +1562,10 @@ module MCP
       refute response[:result].key?(:instructions)
     end
 
-    test "tools/call returns protocol error in JSON-RPC format for missing arguments" do
-      server = Server.new(
-        tools: [TestTool],
-        configuration: Configuration.new(validate_tool_call_arguments: true),
-      )
+    test "tools/call returns tool execution error for missing arguments" do
+      configuration = Configuration.new(validate_tool_call_arguments: true)
+      configuration.instrumentation_callback = instrumentation_helper.callback
+      server = Server.new(tools: [TestTool], configuration: configuration)
 
       response = server.handle(
         {
@@ -1581,17 +1580,22 @@ module MCP
 
       assert_equal "2.0", response[:jsonrpc]
       assert_equal 1, response[:id]
-      assert_nil response[:result]
-      assert_equal(-32602, response[:error][:code])
-      assert_equal "Invalid params", response[:error][:message]
-      assert_includes response[:error][:data], "Missing required arguments"
+      assert_nil response[:error]
+      assert(response[:result][:isError])
+      assert_equal "text", response[:result][:content][0][:type]
+      assert_includes response[:result][:content][0][:text], "Missing required arguments"
+      assert_instrumentation_data({
+        method: "tools/call",
+        tool_name: "test_tool",
+        tool_arguments: {},
+        error: :missing_required_arguments,
+      })
     end
 
-    test "tools/call returns protocol error in JSON-RPC format for invalid arguments when validate_tool_call_arguments is true" do
-      server = Server.new(
-        tools: [TestTool],
-        configuration: Configuration.new(validate_tool_call_arguments: true),
-      )
+    test "tools/call returns tool execution error for invalid arguments when validate_tool_call_arguments is true" do
+      configuration = Configuration.new(validate_tool_call_arguments: true)
+      configuration.instrumentation_callback = instrumentation_helper.callback
+      server = Server.new(tools: [TestTool], configuration: configuration)
 
       response = server.handle(
         {
@@ -1607,10 +1611,44 @@ module MCP
 
       assert_equal "2.0", response[:jsonrpc]
       assert_equal 1, response[:id]
-      assert_nil response[:result]
-      assert_equal(-32602, response[:error][:code])
-      assert_equal "Invalid params", response[:error][:message]
-      assert_includes response[:error][:data], "Invalid arguments"
+      assert_nil response[:error]
+      assert(response[:result][:isError])
+      assert_equal "text", response[:result][:content][0][:type]
+      assert_includes response[:result][:content][0][:text], "Invalid arguments"
+      assert_instrumentation_data({
+        method: "tools/call",
+        tool_name: "test_tool",
+        tool_arguments: { message: 123 },
+        error: :invalid_schema,
+      })
+    end
+
+    test "tools/call returns tool execution error for nested schema validation failure" do
+      server = Server.new(
+        tools: [ComplexTypesTool],
+        configuration: Configuration.new(validate_tool_call_arguments: true),
+      )
+
+      response = server.handle(
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "complex_types_tool",
+            arguments: {
+              numbers: [1, 2, 3],
+              strings: ["a", "b", "c"],
+              objects: [{ name: 123 }],
+            },
+          },
+        },
+      )
+
+      assert_nil response[:error]
+      assert(response[:result][:isError])
+      assert_equal "text", response[:result][:content][0][:type]
+      assert_includes response[:result][:content][0][:text], "Invalid arguments"
     end
 
     test "tools/call skips argument validation when validate_tool_call_arguments is false" do
@@ -1695,7 +1733,7 @@ module MCP
       assert_equal "OK", response[:result][:content][0][:content]
     end
 
-    test "tools/call returns protocol error in JSON-RPC format when additionalProperties set to false" do
+    test "tools/call returns tool execution error when additionalProperties set to false" do
       server = Server.new(
         tools: [TestToolWithAdditionalPropertiesSetToFalse],
         configuration: Configuration.new(validate_tool_call_arguments: true),
@@ -1718,10 +1756,33 @@ module MCP
 
       assert_equal "2.0", response[:jsonrpc]
       assert_equal 1, response[:id]
+      assert_nil response[:error]
+      assert(response[:result][:isError])
+      assert_equal "text", response[:result][:content][0][:type]
+      assert_includes response[:result][:content][0][:text], "Invalid arguments"
+    end
+
+    test "tools/call returns JSON-RPC -32602 protocol error when tool is not found" do
+      server = Server.new(
+        tools: [TestTool],
+      )
+
+      response = server.handle(
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "unknown_tool",
+            arguments: {},
+          },
+        },
+      )
+
       assert_nil response[:result]
       assert_equal(-32602, response[:error][:code])
       assert_equal "Invalid params", response[:error][:message]
-      assert_includes response[:error][:data], "Invalid arguments"
+      assert_includes response[:error][:data], "Tool not found: unknown_tool"
     end
 
     test "#handle completion/complete returns default completion result" do
