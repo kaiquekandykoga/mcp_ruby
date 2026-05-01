@@ -533,7 +533,7 @@ module MCP
         add_instrumentation_data(error: :missing_required_arguments)
 
         missing = tool.input_schema.missing_required_arguments(arguments).join(", ")
-        raise RequestHandlerError.new("Missing required arguments: #{missing}", request, error_type: :invalid_params)
+        return error_tool_response("Missing required arguments: #{missing}")
       end
 
       if configuration.validate_tool_call_arguments && tool.input_schema
@@ -542,7 +542,7 @@ module MCP
         rescue Tool::InputSchema::ValidationError => e
           add_instrumentation_data(error: :invalid_schema)
 
-          raise RequestHandlerError.new(e.message, request, error_type: :invalid_params)
+          return error_tool_response(e.message)
         end
       end
 
