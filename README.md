@@ -1782,6 +1782,9 @@ stdio_transport = MCP::Client::Stdio.new(
 )
 client = MCP::Client.new(transport: stdio_transport)
 
+# Perform the MCP initialization handshake before sending any requests.
+client.connect
+
 # List available tools.
 tools = client.tools
 tools.each do |tool|
@@ -1821,6 +1824,9 @@ Example usage:
 ```ruby
 http_transport = MCP::Client::HTTP.new(url: "https://api.example.com/mcp")
 client = MCP::Client.new(transport: http_transport)
+
+# Perform the MCP initialization handshake before sending any requests.
+client.connect
 
 # List available tools
 tools = client.tools

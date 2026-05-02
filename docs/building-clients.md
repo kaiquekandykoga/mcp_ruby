@@ -16,6 +16,22 @@ The `MCP::Client` class provides an interface for interacting with MCP servers.
 - Prompt listing (`MCP::Client#prompts`) and retrieval (`MCP::Client#get_prompt`)
 - Completion requests (`MCP::Client#complete`)
 
+## Handshake
+
+Call `MCP::Client#connect` to perform the MCP [initialization handshake](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#initialization) before sending any other requests. The client sends an `initialize` request through the transport, followed by the required `notifications/initialized` notification, and caches the server's `InitializeResult` (protocol version, capabilities, server info, instructions):
+
+```ruby
+client.connect
+# => { "protocolVersion" => "2025-11-25", "capabilities" => {...}, "serverInfo" => {...} }
+
+client.connected?  # => true
+client.server_info # => cached InitializeResult
+```
+
+`connect` accepts optional `client_info:`, `protocol_version:`, and `capabilities:` keyword arguments. It is idempotent: a second call returns the cached result without contacting the server. After `close`, state is cleared and `connect` will handshake again.
+
+This applies to both the Stdio and HTTP transports below.
+
 ## Stdio Transport
 
 Use `MCP::Client::Stdio` to interact with MCP servers running as subprocesses:
@@ -28,6 +44,7 @@ stdio_transport = MCP::Client::Stdio.new(
   read_timeout: 30
 )
 client = MCP::Client.new(transport: stdio_transport)
+client.connect
 
 tools = client.tools
 tools.each do |tool|
@@ -74,20 +91,6 @@ response = client.call_tool(
   arguments: { message: "Hello, world!" }
 )
 ```
-
-### Handshake
-
-Call `MCP::Client#connect` to perform the MCP [initialization handshake](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle#initialization): the client sends an `initialize` request through the transport, followed by the required `notifications/initialized` notification, and caches the server's `InitializeResult` (protocol version, capabilities, server info, instructions):
-
-```ruby
-client.connect
-# => { "protocolVersion" => "2025-11-25", "capabilities" => {...}, "serverInfo" => {...} }
-
-client.connected?  # => true
-client.server_info # => cached InitializeResult
-```
-
-`connect` accepts optional `client_info:`, `protocol_version:`, and `capabilities:` keyword arguments. It is idempotent — a second call returns the cached result without contacting the server. After `close`, state is cleared and `connect` will handshake again.
 
 ### Sessions
 

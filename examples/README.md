@@ -28,10 +28,10 @@ $ ruby examples/stdio_client.rb
 
 The client will automatically launch `stdio_server.rb` as a subprocess and demonstrate:
 
+- Performing the MCP initialization handshake via `client.connect`
 - Listing and calling tools
 - Listing prompts
 - Listing and reading resources
-- Automatic MCP protocol initialization
 - Transport cleanup on exit
 
 ### 3. HTTP Server (`http_server.rb`)
