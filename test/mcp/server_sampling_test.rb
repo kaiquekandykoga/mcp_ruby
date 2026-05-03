@@ -14,7 +14,7 @@ module MCP
         @requests = []
       end
 
-      def send_request(method, params = nil)
+      def send_request(method, params = nil, **_kwargs)
         @requests << { method: method, params: params }
         {
           role: "assistant",
@@ -25,7 +25,7 @@ module MCP
       end
 
       def send_response(response); end
-      def send_notification(method, params = nil); end
+      def send_notification(method, params = nil, **_kwargs); end
       def open; end
       def close; end
     end

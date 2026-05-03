@@ -54,6 +54,13 @@ module MCP
           false
         end
 
+        # NOTE: This signature deliberately matches the abstract `Transport#send_request` contract
+        # (`method, params = nil`) without the cancellation kwargs that `StreamableHTTPTransport#send_request` accepts.
+        # On Ruby 2.7 the project's supported minimum a method that mixes a positional `params` Hash with
+        # explicit keyword arguments cannot be called as `send_request(method, { ... })` - the trailing Hash would be
+        # auto-promoted to keyword arguments. Stdio is single-threaded and blocks on `$stdin.gets`, so nested-request
+        # cancellation has very limited value here regardless; servers that need cancellation propagation for nested
+        # server-to-client requests should use `StreamableHTTPTransport`.
         def send_request(method, params = nil)
           request_id = generate_request_id
           request = { jsonrpc: "2.0", id: request_id, method: method }
