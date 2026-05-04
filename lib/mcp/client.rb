@@ -61,18 +61,17 @@ module MCP
 
     # The server's `InitializeResult` (protocol version, capabilities, server info,
     # instructions), as reported by the transport after a successful `connect`.
-    # Returns `nil` before `connect`, after `close`, or when the transport manages
-    # the handshake implicitly and does not expose it (e.g. stdio).
+    # Returns `nil` before `connect`, after `close`, or when the transport does
+    # not expose a cached handshake result.
     def server_info
       transport.server_info if transport.respond_to?(:server_info)
     end
 
-    # Performs the MCP `initialize` handshake by delegating to the transport when
-    # it exposes a `connect` method (e.g. `MCP::Client::HTTP`). Returns the
-    # server's `InitializeResult`.
+    # Performs the MCP `initialize` handshake by delegating to the transport
+    # (e.g. `MCP::Client::HTTP`, `MCP::Client::Stdio`). Returns the server's
+    # `InitializeResult`.
     #
-    # When the transport does not respond to `:connect` (e.g. `MCP::Client::Stdio`
-    # manages the handshake implicitly on the first request), this is a no-op and
+    # When the transport does not respond to `:connect`, this is a no-op and
     # returns `nil`.
     #
     # @param client_info [Hash, nil] `{ name:, version: }` identifying the client.
@@ -91,10 +90,9 @@ module MCP
       )
     end
 
-    # Returns true once `connect` has completed the handshake on transports that
-    # expose connection state. Transports that manage the handshake implicitly
-    # (e.g. stdio) always report `true`, since the first request will initialize
-    # on demand.
+    # Returns true once `connect` has completed the handshake on the underlying
+    # transport. Transports that do not expose connection state are assumed
+    # connected and return `true`.
     def connected?
       return transport.connected? if transport.respond_to?(:connected?)
 
