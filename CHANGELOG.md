@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-05-05
+
+### Added
+
+- Support `notifications/cancelled` per MCP specification (#332)
+- Add client-level `connect` for initialize handshake (#327)
+- Add client-level `connect` handshake to stdio transport (#336)
+
+### Changed
+
+- Return tool argument validation failures as tool execution errors (#333)
+
+### Removed
+
+- Remove obsolete `MCP::Transports` module (#331)
+
 ## [0.14.0] - 2026-04-24
 
 ### Added
