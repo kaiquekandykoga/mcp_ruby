@@ -1390,7 +1390,7 @@ module MCP
         Tool::Response.new({ "response" => message })
       end
 
-      stored_tool = @server.instance_variable_get(:@tools)["defined_tool"]
+      stored_tool = @server.tools["defined_tool"]
       assert_not_nil(stored_tool)
       assert_equal(MCP::Tool::OutputSchema.new({ type: "object", properties: { response: { type: "string" } }, required: ["response"] }), stored_tool.output_schema)
 
