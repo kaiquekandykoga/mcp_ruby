@@ -586,9 +586,11 @@ module MCP
 
       progress_token = request.dig(:_meta, :progressToken)
 
-      call_tool_with_args(
+      result = call_tool_with_args(
         tool, arguments, server_context_with_meta(request), progress_token: progress_token, session: session, related_request_id: related_request_id, cancellation: cancellation
       )
+      validate_tool_call_result!(tool, result)
+      result
     rescue RequestHandlerError, CancelledError
       # CancelledError is intentionally not wrapped so `handle_request` can turn it into
       # `JsonRpcHandler::NO_RESPONSE` per the MCP cancellation spec.
@@ -743,6 +745,14 @@ module MCP
         }],
         error: true,
       ).to_h
+    end
+
+    def validate_tool_call_result!(tool, result)
+      return unless configuration.validate_tool_call_results
+      return unless tool.output_schema
+      return if result[:isError]
+
+      tool.output_schema.validate_result(result[:structuredContent])
     end
 
     # Whether a tool/prompt handler opts in to receiving an `MCP::ServerContext`.

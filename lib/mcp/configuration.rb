@@ -16,7 +16,7 @@ module MCP
     attr_writer :instrumentation_callback
 
     def initialize(exception_reporter: nil, around_request: nil, instrumentation_callback: nil, protocol_version: nil,
-      validate_tool_call_arguments: true)
+      validate_tool_call_arguments: true, validate_tool_call_results: false)
       @exception_reporter = exception_reporter
       @around_request = around_request
       @instrumentation_callback = instrumentation_callback
@@ -25,8 +25,10 @@ module MCP
         validate_protocol_version!(protocol_version)
       end
       validate_value_of_validate_tool_call_arguments!(validate_tool_call_arguments)
+      validate_value_of_validate_tool_call_results!(validate_tool_call_results)
 
       @validate_tool_call_arguments = validate_tool_call_arguments
+      @validate_tool_call_results = validate_tool_call_results
     end
 
     def protocol_version=(protocol_version)
@@ -39,6 +41,12 @@ module MCP
       validate_value_of_validate_tool_call_arguments!(validate_tool_call_arguments)
 
       @validate_tool_call_arguments = validate_tool_call_arguments
+    end
+
+    def validate_tool_call_results=(validate_tool_call_results)
+      validate_value_of_validate_tool_call_results!(validate_tool_call_results)
+
+      @validate_tool_call_results = validate_tool_call_results
     end
 
     def protocol_version
@@ -80,9 +88,14 @@ module MCP
     end
 
     attr_reader :validate_tool_call_arguments
+    attr_reader :validate_tool_call_results
 
     def validate_tool_call_arguments?
       !!@validate_tool_call_arguments
+    end
+
+    def validate_tool_call_results?
+      !!@validate_tool_call_results
     end
 
     def merge(other)
@@ -113,6 +126,7 @@ module MCP
       end
 
       validate_tool_call_arguments = other.validate_tool_call_arguments
+      validate_tool_call_results = other.validate_tool_call_results
 
       Configuration.new(
         exception_reporter: exception_reporter,
@@ -120,6 +134,7 @@ module MCP
         instrumentation_callback: instrumentation_callback,
         protocol_version: protocol_version,
         validate_tool_call_arguments: validate_tool_call_arguments,
+        validate_tool_call_results: validate_tool_call_results,
       )
     end
 
@@ -135,6 +150,12 @@ module MCP
     def validate_value_of_validate_tool_call_arguments!(validate_tool_call_arguments)
       unless validate_tool_call_arguments.is_a?(TrueClass) || validate_tool_call_arguments.is_a?(FalseClass)
         raise ArgumentError, "validate_tool_call_arguments must be a boolean"
+      end
+    end
+
+    def validate_value_of_validate_tool_call_results!(validate_tool_call_results)
+      unless validate_tool_call_results.is_a?(TrueClass) || validate_tool_call_results.is_a?(FalseClass)
+        raise ArgumentError, "validate_tool_call_results must be a boolean"
       end
     end
 
