@@ -123,6 +123,7 @@ module MCP
           name: tool["name"],
           description: tool["description"],
           input_schema: tool["inputSchema"],
+          output_schema: tool["outputSchema"],
         )
       end
 

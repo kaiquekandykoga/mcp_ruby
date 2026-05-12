@@ -81,7 +81,12 @@ module MCP
       mock_response = {
         "result" => {
           "tools" => [
-            { "name" => "tool1", "description" => "tool1", "inputSchema" => {} },
+            {
+              "name" => "tool1",
+              "description" => "tool1",
+              "inputSchema" => {},
+              "outputSchema" => { "type" => "object", "properties" => { "result" => { "type" => "string" } } },
+            },
             { "name" => "tool2", "description" => "tool2", "inputSchema" => {} },
           ],
         },
@@ -97,7 +102,9 @@ module MCP
 
       assert_equal(2, tools.size)
       assert_equal("tool1", tools.first.name)
+      assert_equal({ "type" => "object", "properties" => { "result" => { "type" => "string" } } }, tools.first.output_schema)
       assert_equal("tool2", tools.last.name)
+      assert_nil(tools.last.output_schema)
     end
 
     def test_tools_returns_empty_array_when_no_tools
