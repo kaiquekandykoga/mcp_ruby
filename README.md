@@ -645,6 +645,19 @@ MCP spec for the [Output Schema](https://modelcontextprotocol.io/specification/l
 
 The output schema follows standard JSON Schema format and helps ensure consistent data exchange between MCP servers and clients.
 
+By default, server-side validation of tool results against `output_schema` is disabled for backwards compatibility. To validate successful tool responses, enable `validate_tool_call_results`:
+
+```ruby
+configuration = MCP::Configuration.new(validate_tool_call_results: true)
+server = MCP::Server.new(
+  name: "example_server",
+  tools: [WeatherTool],
+  configuration: configuration
+)
+```
+
+When enabled, successful tool responses for tools with an `output_schema` must include `structured_content` that conforms to the schema. Error responses are not validated against the output schema.
+
 ### Tool Responses with Structured Content
 
 Tools can return structured data alongside text content using the `structured_content` parameter.

@@ -1767,6 +1767,156 @@ module MCP
       assert_includes response[:result][:content][0][:text], "Invalid arguments"
     end
 
+    test "tools/call skips output schema validation by default" do
+      tool = Tool.define(
+        name: "invalid_structured_content_tool",
+        output_schema: {
+          type: "object",
+          properties: { result: { type: "string" } },
+          required: ["result"],
+        },
+      ) do
+        Tool::Response.new(
+          [{ type: "text", text: "ok" }],
+          structured_content: { result: 123 },
+        )
+      end
+      server = Server.new(tools: [tool])
+
+      response = server.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "invalid_structured_content_tool" },
+      })
+
+      assert_nil response[:error]
+      assert_equal({ result: 123 }, response[:result][:structuredContent])
+    end
+
+    test "tools/call validates structuredContent against output schema when enabled" do
+      tool = Tool.define(
+        name: "valid_structured_content_tool",
+        output_schema: {
+          type: "object",
+          properties: { result: { type: "string" } },
+          required: ["result"],
+        },
+      ) do
+        Tool::Response.new(
+          [{ type: "text", text: "ok" }],
+          structured_content: { result: "success" },
+        )
+      end
+      server = Server.new(
+        tools: [tool],
+        configuration: Configuration.new(validate_tool_call_results: true),
+      )
+
+      response = server.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "valid_structured_content_tool" },
+      })
+
+      assert_nil response[:error]
+      assert_equal({ result: "success" }, response[:result][:structuredContent])
+    end
+
+    test "tools/call returns JSON-RPC error for invalid structuredContent when output schema validation is enabled" do
+      tool = Tool.define(
+        name: "invalid_structured_content_tool",
+        output_schema: {
+          type: "object",
+          properties: { result: { type: "string" } },
+          required: ["result"],
+        },
+      ) do
+        Tool::Response.new(
+          [{ type: "text", text: "ok" }],
+          structured_content: { result: 123 },
+        )
+      end
+      server = Server.new(
+        tools: [tool],
+        configuration: Configuration.new(validate_tool_call_results: true),
+      )
+
+      response = server.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "invalid_structured_content_tool" },
+      })
+
+      assert_nil response[:result]
+      assert_equal(-32603, response[:error][:code])
+      assert_equal "Internal error", response[:error][:message]
+      assert_match(/Internal error calling tool invalid_structured_content_tool: Invalid result:/, response[:error][:data])
+    end
+
+    test "tools/call returns JSON-RPC error when output schema validation is enabled and structuredContent is missing" do
+      tool = Tool.define(
+        name: "missing_structured_content_tool",
+        output_schema: {
+          type: "object",
+          properties: { result: { type: "string" } },
+          required: ["result"],
+        },
+      ) do
+        Tool::Response.new([{ type: "text", text: "ok" }])
+      end
+      server = Server.new(
+        tools: [tool],
+        configuration: Configuration.new(validate_tool_call_results: true),
+      )
+
+      response = server.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "missing_structured_content_tool" },
+      })
+
+      assert_nil response[:result]
+      assert_equal(-32603, response[:error][:code])
+      assert_equal "Internal error", response[:error][:message]
+      assert_match(/Internal error calling tool missing_structured_content_tool: Invalid result:/, response[:error][:data])
+    end
+
+    test "tools/call skips output schema validation for error responses" do
+      tool = Tool.define(
+        name: "error_response_tool",
+        output_schema: {
+          type: "object",
+          properties: { result: { type: "string" } },
+          required: ["result"],
+        },
+      ) do
+        Tool::Response.new(
+          [{ type: "text", text: "failed" }],
+          error: true,
+          structured_content: { result: 123 },
+        )
+      end
+      server = Server.new(
+        tools: [tool],
+        configuration: Configuration.new(validate_tool_call_results: true),
+      )
+
+      response = server.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "error_response_tool" },
+      })
+
+      assert_nil response[:error]
+      assert response[:result][:isError]
+      assert_equal({ result: 123 }, response[:result][:structuredContent])
+    end
+
     test "tools/call returns JSON-RPC -32602 protocol error when tool is not found" do
       server = Server.new(
         tools: [TestTool],
