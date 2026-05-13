@@ -263,7 +263,9 @@ module MCP
       assert_equal "test_tool", result[:tools][0][:name]
       assert_equal "Test tool", result[:tools][0][:title]
       assert_equal "A test tool", result[:tools][0][:description]
-      assert_equal({ type: "object" }, result[:tools][0][:inputSchema])
+      assert_equal(
+        { "$schema": "https://json-schema.org/draft/2020-12/schema", type: "object" }, result[:tools][0][:inputSchema]
+      )
       assert_equal({ foo: "bar" }, result[:tools][0][:_meta])
       assert_instrumentation_data({ method: "tools/list" })
     end
@@ -282,6 +284,24 @@ module MCP
       assert_equal "Test tool", result[:tools][0][:title]
       assert_equal "A test tool", result[:tools][0][:description]
       assert_equal({ foo: "bar" }, result[:tools][0][:_meta])
+    end
+
+    test "#handle tools/list emits 2020-12 $schema on inputSchema and outputSchema" do
+      tool_with_output = Tool.define(
+        name: "tool_with_output",
+        description: "tool with output schema",
+        input_schema: { properties: { msg: { type: "string" } } },
+        output_schema: { properties: { result: { type: "string" } } },
+      ) do
+        Tool::Response.new([{ type: "text", content: "OK" }])
+      end
+      server = Server.new(name: "test_server", tools: [tool_with_output])
+
+      response = server.handle({ jsonrpc: "2.0", method: "tools/list", id: 1 })
+      tool = response[:result][:tools][0]
+
+      assert_equal "https://json-schema.org/draft/2020-12/schema", tool[:inputSchema][:"$schema"]
+      assert_equal "https://json-schema.org/draft/2020-12/schema", tool[:outputSchema][:"$schema"]
     end
 
     test "#handle tools/call executes tool and returns result" do
