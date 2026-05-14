@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-05-14
+
+### Added
+
+- Add opt-in tool output validation (#344)
+
+### Changed
+
+- Advertise JSON Schema 2020-12 dialect on emitted tool schemas (#342)
+
+### Fixed
+
+- Preserve client tool output schemas (#343)
+- Fix missing `output_schema` argument in `define_tool` API (#301)
+
 ## [0.15.0] - 2026-05-05
 
 ### Added
