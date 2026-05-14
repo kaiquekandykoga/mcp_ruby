@@ -1385,6 +1385,258 @@ module MCP
           assert_equal "text/event-stream", response[1]["Content-Type"]
         end
 
+        test "POST initialize request ignores MCP-Protocol-Version header" do
+          request = create_rack_request(
+            "POST",
+            "/",
+            {
+              "CONTENT_TYPE" => "application/json",
+              "HTTP_MCP_PROTOCOL_VERSION" => "1900-01-01",
+            },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 200, response[0]
+        end
+
+        test "POST request with unsupported MCP-Protocol-Version returns 400" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          request = create_rack_request(
+            "POST",
+            "/",
+            {
+              "CONTENT_TYPE" => "application/json",
+              "HTTP_MCP_SESSION_ID" => session_id,
+              "HTTP_MCP_PROTOCOL_VERSION" => "1999-01-01",
+            },
+            { jsonrpc: "2.0", method: "tools/list", id: "list" }.to_json,
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 400, response[0]
+          assert_equal({ "Content-Type" => "application/json" }, response[1])
+
+          body = JSON.parse(response[2][0])
+          assert_equal "2.0", body["jsonrpc"]
+          assert_nil body["id"]
+          assert_equal JsonRpcHandler::ErrorCode::INVALID_REQUEST, body["error"]["code"]
+          assert_includes body["error"]["message"], "1999-01-01"
+          assert_includes body["error"]["message"], Configuration::LATEST_STABLE_PROTOCOL_VERSION
+        end
+
+        test "POST request with malformed MCP-Protocol-Version returns 400" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          request = create_rack_request(
+            "POST",
+            "/",
+            {
+              "CONTENT_TYPE" => "application/json",
+              "HTTP_MCP_SESSION_ID" => session_id,
+              "HTTP_MCP_PROTOCOL_VERSION" => "not-a-version",
+            },
+            { jsonrpc: "2.0", method: "tools/list", id: "list" }.to_json,
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 400, response[0]
+
+          body = JSON.parse(response[2][0])
+          assert_includes body["error"]["message"], "not-a-version"
+        end
+
+        test "POST request with supported MCP-Protocol-Version succeeds" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          request = create_rack_request(
+            "POST",
+            "/",
+            {
+              "CONTENT_TYPE" => "application/json",
+              "HTTP_MCP_SESSION_ID" => session_id,
+              "HTTP_MCP_PROTOCOL_VERSION" => Configuration::LATEST_STABLE_PROTOCOL_VERSION,
+            },
+            { jsonrpc: "2.0", method: "tools/list", id: "list" }.to_json,
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 200, response[0]
+        end
+
+        test "POST request without MCP-Protocol-Version header succeeds" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          request = create_rack_request(
+            "POST",
+            "/",
+            {
+              "CONTENT_TYPE" => "application/json",
+              "HTTP_MCP_SESSION_ID" => session_id,
+            },
+            { jsonrpc: "2.0", method: "tools/list", id: "list" }.to_json,
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 200, response[0]
+        end
+
+        test "POST request with array body and unsupported MCP-Protocol-Version returns 400" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          request = create_rack_request(
+            "POST",
+            "/",
+            {
+              "CONTENT_TYPE" => "application/json",
+              "HTTP_MCP_SESSION_ID" => session_id,
+              "HTTP_MCP_PROTOCOL_VERSION" => "1999-01-01",
+            },
+            [{ jsonrpc: "2.0", method: "tools/list", id: "list" }].to_json,
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 400, response[0]
+
+          body = JSON.parse(response[2][0])
+          assert_equal JsonRpcHandler::ErrorCode::INVALID_REQUEST, body["error"]["code"]
+        end
+
+        test "GET request with unsupported MCP-Protocol-Version returns 400" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          request = create_rack_request(
+            "GET",
+            "/",
+            {
+              "HTTP_MCP_SESSION_ID" => session_id,
+              "HTTP_MCP_PROTOCOL_VERSION" => "1999-01-01",
+            },
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 400, response[0]
+
+          body = JSON.parse(response[2][0])
+          assert_equal JsonRpcHandler::ErrorCode::INVALID_REQUEST, body["error"]["code"]
+        end
+
+        test "GET request without MCP-Protocol-Version header succeeds" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          request = create_rack_request(
+            "GET",
+            "/",
+            { "HTTP_MCP_SESSION_ID" => session_id },
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 200, response[0]
+        end
+
+        test "DELETE request with unsupported MCP-Protocol-Version returns 400" do
+          init_request = create_rack_request(
+            "POST",
+            "/",
+            { "CONTENT_TYPE" => "application/json" },
+            { jsonrpc: "2.0", method: "initialize", id: "init" }.to_json,
+          )
+          init_response = @transport.handle_request(init_request)
+          session_id = init_response[1]["Mcp-Session-Id"]
+
+          request = create_rack_request(
+            "DELETE",
+            "/",
+            {
+              "HTTP_MCP_SESSION_ID" => session_id,
+              "HTTP_MCP_PROTOCOL_VERSION" => "1999-01-01",
+            },
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 400, response[0]
+
+          body = JSON.parse(response[2][0])
+          assert_equal JsonRpcHandler::ErrorCode::INVALID_REQUEST, body["error"]["code"]
+        end
+
+        test "DELETE request with unsupported MCP-Protocol-Version returns 400 in stateless mode" do
+          stateless_transport = StreamableHTTPTransport.new(@server, stateless: true)
+
+          request = create_rack_request(
+            "DELETE",
+            "/",
+            { "HTTP_MCP_PROTOCOL_VERSION" => "1999-01-01" },
+          )
+
+          response = stateless_transport.handle_request(request)
+          assert_equal 400, response[0]
+        end
+
+        test "DELETE request validates session before MCP-Protocol-Version" do
+          request = create_rack_request(
+            "DELETE",
+            "/",
+            {
+              "HTTP_MCP_SESSION_ID" => "unknown-session-id",
+              "HTTP_MCP_PROTOCOL_VERSION" => "1999-01-01",
+            },
+          )
+
+          response = @transport.handle_request(request)
+          assert_equal 404, response[0]
+        end
+
         test "stateless mode allows requests without session IDs, responding with no session ID" do
           stateless_transport = StreamableHTTPTransport.new(@server, stateless: true)
 

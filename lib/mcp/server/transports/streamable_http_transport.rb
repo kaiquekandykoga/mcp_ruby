@@ -340,23 +340,28 @@ module MCP
           session_id = extract_session_id(request)
 
           body = parse_request_body(body_string)
-          return body unless body.is_a?(Hash) # Error response
+          return body if parse_error_tuple?(body)
 
-          if body[:method] == "initialize"
-            handle_initialization(body_string, body)
-          else
+          unless initialize_request?(body)
             return missing_session_id_response if !@stateless && !session_id
 
-            if notification?(body)
-              dispatch_notification(body_string, session_id)
-              handle_accepted
-            elsif response?(body)
-              return session_not_found_response if !@stateless && !session_exists?(session_id)
+            protocol_version_error = validate_protocol_version_header(request)
+            return protocol_version_error if protocol_version_error
+          end
 
-              handle_response(body, session_id: session_id)
-            else
-              handle_regular_request(body_string, session_id, related_request_id: body[:id])
-            end
+          return body unless body.is_a?(Hash) # Non-Hash JSON-RPC bodies are not supported in 2025-11-25.
+
+          if initialize_request?(body)
+            handle_initialization(body_string, body)
+          elsif notification?(body)
+            dispatch_notification(body_string, session_id)
+            handle_accepted
+          elsif response?(body)
+            return session_not_found_response if !@stateless && !session_exists?(session_id)
+
+            handle_response(body, session_id: session_id)
+          else
+            handle_regular_request(body_string, session_id, related_request_id: body[:id])
           end
         rescue StandardError => e
           MCP.configuration.exception_reporter.call(e, { request: body_string })
@@ -377,6 +382,10 @@ module MCP
 
           error_response = validate_and_touch_session(session_id)
           return error_response if error_response
+
+          protocol_version_error = validate_protocol_version_header(request)
+          return protocol_version_error if protocol_version_error
+
           return session_already_connected_response if get_session_stream(session_id)
 
           setup_sse_stream(session_id)
@@ -386,12 +395,18 @@ module MCP
           success_response = [200, { "Content-Type" => "application/json" }, [{ success: true }.to_json]]
 
           if @stateless
+            protocol_version_error = validate_protocol_version_header(request)
+            return protocol_version_error if protocol_version_error
+
             # Stateless mode doesn't support sessions, so we can just return a success response
             return success_response
           end
 
           return missing_session_id_response unless (session_id = request.env["HTTP_MCP_SESSION_ID"])
           return session_not_found_response unless session_exists?(session_id)
+
+          protocol_version_error = validate_protocol_version_header(request)
+          return protocol_version_error if protocol_version_error
 
           cleanup_session(session_id)
 
@@ -493,6 +508,31 @@ module MCP
           JSON.parse(body_string, symbolize_names: true)
         rescue JSON::ParserError, TypeError
           [400, { "Content-Type" => "application/json" }, [{ error: "Invalid JSON" }.to_json]]
+        end
+
+        def parse_error_tuple?(body)
+          body.is_a?(Array) && body.size == 3 && body[0] == 400
+        end
+
+        def initialize_request?(body)
+          body.is_a?(Hash) && body[:method] == Methods::INITIALIZE
+        end
+
+        def validate_protocol_version_header(request)
+          header_value = request.env["HTTP_MCP_PROTOCOL_VERSION"]
+          return if header_value.nil?
+          return if MCP::Configuration::SUPPORTED_STABLE_PROTOCOL_VERSIONS.include?(header_value)
+
+          supported = MCP::Configuration::SUPPORTED_STABLE_PROTOCOL_VERSIONS.join(", ")
+          body = {
+            jsonrpc: "2.0",
+            id: nil,
+            error: {
+              code: JsonRpcHandler::ErrorCode::INVALID_REQUEST,
+              message: "Bad Request: Unsupported protocol version: #{header_value}. Supported versions: #{supported}",
+            },
+          }
+          [400, { "Content-Type" => "application/json" }, [body.to_json]]
         end
 
         def notification?(body)
